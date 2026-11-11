@@ -1,8 +1,8 @@
 # Emmanuel Tobi - DevSecOps EKS Pipeline
 replicaCount: 1
 image:
-  # Replace with your actual AWS Account ID
-  repository: <YOUR_AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/devsecops-eks-dev
+  # Set by the DevSecOps pipeline on the `deploy` branch (ArgoCD tracks it)
+  repository: <YOUR_AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/devsecops-eks-dev
   tag: 60e72b830caa7ed0b083568a6916bdb557b84630
   pullPolicy: IfNotPresent
 

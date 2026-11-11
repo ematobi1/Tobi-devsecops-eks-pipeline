@@ -13,10 +13,11 @@
 #   - CodeQL: findings are published to the Security tab (Code scanning).
 #     They do not gate: Juice Shop is vulnerable by design.
 #
-# Pull requests run every scan and the image build. ECR push and the Helm
-# tag bump run only on main, and only when the AWS_ROLE_ARN and
+# Pull requests run every scan and the image build. ECR push and the deploy
+# branch update run only on main, and only when the AWS_ROLE_ARN and
 # AWS_ACCOUNT_ID secrets are configured (OIDC, no
-# long-lived keys).
+# long-lived keys). The image tag is committed to the `deploy` branch
+# (main + one commit), which ArgoCD tracks, so main stays protected.
 # ---------------------------------------------------------------------------
 name: DevSecOps pipeline
 
@@ -24,7 +25,6 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "helm/juice-shop/values.yaml" # the pipeline's own tag bump
       - "**/*.md"
   pull_request:
   workflow_dispatch:
@@ -151,7 +151,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      contents: write # Helm values tag bump
+      contents: write # pushes the deploy branch (never main)
       id-token: write # OIDC to AWS
     env:
       IMAGE: juice-shop:${{ github.sha }}
@@ -203,14 +203,14 @@ jobs:
           docker push "$registry/$ECR_REPOSITORY:$GITHUB_SHA"
           echo "REGISTRY=$registry" >> "$GITHUB_ENV"
 
-      - name: Bump image tag in Helm values
+      - name: Publish deploy branch (main + image tag)
         if: steps.aws.outputs.enabled == 'true'
         run: |
           sed -i "s|repository:.*|repository: ${REGISTRY}/${ECR_REPOSITORY}|" helm/juice-shop/values.yaml
           sed -i "s|tag:.*|tag: ${GITHUB_SHA}|" helm/juice-shop/values.yaml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add helm/juice-shop/values.yaml
-          git diff --cached --quiet && exit 0
-          git commit -m "chore(helm): deploy image ${GITHUB_SHA::12}"
-          git push
+          git commit -am "chore(deploy): juice-shop ${GITHUB_SHA::12}"
+          # deploy is always main@this-commit + the tag bump; ArgoCD syncs it.
+          git push --force origin HEAD:refs/heads/deploy
+          echo "Deployed image tag \`${GITHUB_SHA}\` via the \`deploy\` branch" >> "$GITHUB_STEP_SUMMARY"

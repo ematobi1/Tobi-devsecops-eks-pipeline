@@ -26,9 +26,8 @@ resource "aws_iam_role" "github_actions" {
         Condition = {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          }
-          StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:<YOUR_GITHUB_USERNAME>/devsecops-eks-pipeline:*"
+            # Only workflow runs on main may push images (PRs and forks cannot).
+            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:ref:refs/heads/main"
           }
         }
       }
@@ -66,7 +65,7 @@ resource "aws_iam_role_policy" "github_actions_ecr" {
   })
 }
 
-# Output the role ARN — add this to GitHub Actions ci.yml
+# Role ARN — store as the AWS_ROLE_ARN repository secret
 output "github_actions_role_arn" {
   description = "IAM Role ARN for GitHub Actions OIDC"
   value       = aws_iam_role.github_actions.arn
