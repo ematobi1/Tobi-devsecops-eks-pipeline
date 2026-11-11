@@ -1,0 +1,36 @@
+# Dependabot configuration
+#
+# app/ is OWASP Juice Shop: a deliberately vulnerable application that this
+# DevSecOps pipeline scans. Its vulnerable dependency versions are the point,
+# and upgrading them breaks the app and its challenges. Dependabot version and
+# security updates are therefore disabled for app/ and app/frontend/; they stay
+# on for the infrastructure and CI code.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
+
+  - package-ecosystem: npm
+    directory: /app/frontend
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directories:
+      - /terraform/envs/dev
+      - /terraform/modules/*
+    schedule:
+      interval: weekly
