@@ -1,155 +1,216 @@
+# ---------------------------------------------------------------------------
+# DevSecOps pipeline — OWASP Juice Shop on EKS
+#
+#   secret-scan → sast (CodeQL) → sca (Trivy fs) → iac-scan (Checkov)
+#                → build-scan-push (Docker build, Trivy image, ECR, Helm tag)
+#
+# Gates
+#   - gitleaks: any new secret fails the run
+#   - Trivy (fs + image): any fixable CRITICAL fails the run, except the
+#     intentionally vulnerable Juice Shop packages documented in
+#     .trivy/accepted-risk.rego and .trivyignore
+#   - Checkov: any failed Terraform check fails the run
+#   - CodeQL: findings are published to the Security tab (Code scanning).
+#     They do not gate: Juice Shop is vulnerable by design.
+#
+# Pull requests run every scan and the image build. ECR push and the Helm
+# tag bump run only on main, and only when the AWS_ROLE_ARN and
+# AWS_ACCOUNT_ID secrets are configured (OIDC, no
+# long-lived keys).
+# ---------------------------------------------------------------------------
 name: DevSecOps pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths-ignore:
+      - "helm/juice-shop/values.yaml" # the pipeline's own tag bump
+      - "**/*.md"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.58.1
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.24.2
+  CHECKOV_VERSION: "3.4.4"
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: devsecops-eks-dev
+
 jobs:
-  pipeline-info:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-    steps:
-      - name: checkout code
-        uses: actions/checkout@v4.2.2
-
-      - name: show branch name
-        run: echo "Running on branch ${{ github.ref_name }}"
-
-      - name: show commit details
-        run: |
-          echo "Commit SHA : ${{ github.sha}}"
-          echo "Triggered by : ${{ github.actor }}"
-          echo "Repository : ${{ github.repository }}"
-
-      - name: List project structuer
-        run: ls -la
-
   secret-scan:
-    runs-on: ubuntu-latest
-    needs: pipeline-info
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+      - name: Pipeline context
+        run: |
+          {
+            echo "### Pipeline context"
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Triggered by: \`${GITHUB_ACTOR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan pushed commits
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          GITHUB_SHA="$HEAD_SHA"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="-1 $GITHUB_SHA"
+          else
+            range="$BEFORE..$GITHUB_SHA"
+          fi
+          echo "Scanning: $range"
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/repo" "$GITLEAKS_IMAGE" \
+            git /repo --log-opts="$range" --config /repo/.gitleaks.toml \
+            --redact --no-banner --verbose --exit-code 1
 
   sast:
-    runs-on: ubuntu-latest
+    name: SAST (CodeQL)
     needs: secret-scan
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          config: |
+            paths:
+              - app
+            paths-ignore:
+              - app/test
+              - "**/node_modules"
+              - "**/dist"
+              - "**/*.spec.ts"
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
 
   sca:
-    runs-on: ubuntu-latest
+    name: SCA (Trivy filesystem)
     needs: sast
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.2.2
-
-      - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@master
+      - uses: actions/checkout@v7
         with:
-          scan-type: fs
-          scan-ref: ./app
-          severity: CRITICAL
-          exit-code: 1
-          format: table
-          ignore-unfixed: true
+          persist-credentials: false
+
+      - name: Scan dependencies (lockfiles)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" \
+            fs ./app --scanners vuln --severity CRITICAL --ignore-unfixed \
+            --ignorefile .trivyignore --ignore-policy .trivy/accepted-risk.rego \
+            --exit-code 1 --no-progress --format table
 
   iac-scan:
-    runs-on: ubuntu-latest
+    name: IaC scan (Checkov)
     needs: sca
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.2.2
-
-      - name: Run Checkov
-        uses: bridgecrewio/checkov-action@master
+      - uses: actions/checkout@v7
         with:
-          directory: terraform/
-          framework: terraform
-          soft_fail: false
-          output_format: cli
-          skip_check: CKV_AWS_38,CKV_AWS_39
+          persist-credentials: false
+
+      - name: Install Checkov
+        run: pipx install "checkov==${CHECKOV_VERSION}"
+
+      - name: Scan Terraform
+        run: |
+          checkov --directory terraform/ --framework terraform \
+            --skip-check CKV_AWS_38,CKV_AWS_39 --compact --output cli
 
   build-scan-push:
-    runs-on: ubuntu-latest
+    name: Build, scan & push image
     needs: iac-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
-      id-token: write
-      contents: write
+      contents: write # Helm values tag bump
+      id-token: write # OIDC to AWS
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      IMAGE: juice-shop:${{ github.sha }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7
 
-      - name: Build Docker image
-        run: docker build -t juice-shop:${{ github.sha }} ./app
+      - name: Build image
+        run: docker build --pull -t "$IMAGE" ./app
 
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: image
-          image-ref: juice-shop:${{ github.sha }}
-          severity: CRITICAL
-          exit-code: 1
-          format: table
-          ignore-unfixed: true
-          trivyignores: .trivyignore
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ap-south-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Tag and push image to ECR
+      - name: Scan image (Trivy)
         run: |
-          ECR_URL=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com/devsecops-eks-dev
-          docker tag juice-shop:${{ github.sha }} $ECR_URL:${{ github.sha }}
-          docker push $ECR_URL:${{ github.sha }}
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src" -w /src \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" \
+            image "$IMAGE" --scanners vuln --severity CRITICAL --ignore-unfixed \
+            --ignorefile .trivyignore --ignore-policy .trivy/accepted-risk.rego \
+            --exit-code 1 --no-progress --format table
 
-      - name: Update image tag in Helm values
+      - name: Check AWS deployment config
+        id: aws
         run: |
-          ECR_URL=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com/devsecops-eks-dev
-          sed -i "s|repository:.*|repository: $ECR_URL|" helm/juice-shop/values.yaml
-          sed -i "s|tag:.*|tag: ${{ github.sha }}|" helm/juice-shop/values.yaml
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          if [ -n "$AWS_ROLE_ARN" ] && [ -n "$AWS_ACCOUNT_ID" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS_ROLE_ARN / AWS_ACCOUNT_ID not configured — image built and scanned; ECR push and Helm tag bump skipped."
+          fi
+
+      - name: Assume AWS role (OIDC)
+        if: steps.aws.outputs.enabled == 'true'
+        run: |
+          token=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          creds=$(aws sts assume-role-with-web-identity --region "$AWS_REGION" \
+            --role-arn "$AWS_ROLE_ARN" --role-session-name "gha-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" --duration-seconds 3600 --query Credentials --output json)
+          for k in AccessKeyId:AWS_ACCESS_KEY_ID SecretAccessKey:AWS_SECRET_ACCESS_KEY SessionToken:AWS_SESSION_TOKEN; do
+            v=$(jq -r ".${k%%:*}" <<<"$creds"); echo "::add-mask::$v"; echo "${k##*:}=$v" >> "$GITHUB_ENV"
+          done
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+
+      - name: Push image to ECR
+        if: steps.aws.outputs.enabled == 'true'
+        run: |
+          registry="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          docker tag "$IMAGE" "$registry/$ECR_REPOSITORY:$GITHUB_SHA"
+          docker push "$registry/$ECR_REPOSITORY:$GITHUB_SHA"
+          echo "REGISTRY=$registry" >> "$GITHUB_ENV"
+
+      - name: Bump image tag in Helm values
+        if: steps.aws.outputs.enabled == 'true'
+        run: |
+          sed -i "s|repository:.*|repository: ${REGISTRY}/${ECR_REPOSITORY}|" helm/juice-shop/values.yaml
+          sed -i "s|tag:.*|tag: ${GITHUB_SHA}|" helm/juice-shop/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add helm/juice-shop/values.yaml
-          git commit -m "Update image tag to ${{ github.sha }}"
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(helm): deploy image ${GITHUB_SHA::12}"
           git push
-
-

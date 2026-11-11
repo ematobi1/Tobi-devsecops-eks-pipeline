@@ -1,16 +1,11 @@
-# Intentionally vulnerable dependencies in OWASP Juice Shop
-# These are known CVEs in demo/challenge packages — not real app code
+# Per-CVE exceptions for OWASP Juice Shop's intentionally vulnerable
+# dependencies. Package-wide accepted risk lives in .trivy/accepted-risk.rego.
 
-# crypto-js - intentionally weak crypto for challenges
+# crypto-js — superseded: pinned to ^4.2.0 via npm overrides in app/package.json
 CVE-2023-46233
 
-# jsonwebtoken - intentionally weak JWT for challenges
+# jsonwebtoken 0.4.0 — intentionally weak JWT for the token-forging challenges
 CVE-2015-9235
 
-# lodash - intentionally vulnerable for challenges
+# lodash — intentionally vulnerable for the prototype-pollution challenge
 CVE-2019-10744
-
-# vm2 - intentionally vulnerable sandbox for challenges
-CVE-2023-32314
-CVE-2023-37466
-CVE-2026-22709
