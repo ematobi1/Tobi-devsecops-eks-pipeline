@@ -10,6 +10,9 @@
 *.crt
 *.p12
 !app/encryptionkeys/
+# OWASP Juice Shop ships intentional demo keys the app reads at runtime
+!app/encryptionkeys/*.key
+!app/ctf.key
 
 # -----------------------------------------------
 # Terraform

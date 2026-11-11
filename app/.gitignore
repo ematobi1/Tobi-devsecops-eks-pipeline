@@ -30,6 +30,8 @@ vagrant/.vagrant/
 JSON
 JSON.map
 frontend/src/**/*.js
+!frontend/src/karma.conf.js
+!frontend/src/assets/private/*.js
 /bom.json
 /bom.xml
 
