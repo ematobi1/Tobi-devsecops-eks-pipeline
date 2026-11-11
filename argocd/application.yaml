@@ -7,7 +7,8 @@ spec:
   project: default
   source:
     repoURL: https://github.com/ematobi1/Tobi-devsecops-eks-pipeline.git
-    targetRevision: main
+    # `deploy` = main + the CI image-tag bump (written by .github/workflows/ci.yml)
+    targetRevision: deploy
     path: helm/juice-shop
   destination:
     server: https://kubernetes.default.svc

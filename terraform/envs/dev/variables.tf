@@ -15,3 +15,9 @@ variable "region" {
   type        = string
   default     = "ap-south-1"
 }
+
+variable "github_repository" {
+  description = "GitHub repository (owner/name) allowed to assume the CI role"
+  type        = string
+  default     = "ematobi1/Tobi-devsecops-eks-pipeline"
+}
